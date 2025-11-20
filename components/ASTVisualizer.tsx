@@ -56,6 +56,7 @@ export function ASTVisualizer({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dimensions, setDimensions] = useState({ width: 900, height: 480 });
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const viewRef = useRef<ViewState>({ scale: 1, offsetX: 0, offsetY: 60 });
   const hasInteractedRef = useRef(false);
   const dragging = useRef(false);
@@ -186,17 +187,41 @@ export function ASTVisualizer({
     redraw();
   }, [dimensions, positionedNodes, redraw]);
 
+  const panelClasses = [
+    "glass-panel rounded-3xl p-6 transition-all",
+    isFullscreen ? "fixed inset-6 z-50 h-[calc(100vh-3rem)] w-[calc(100vw-3rem)]" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const canvasWrapperClasses = isFullscreen
+    ? "relative h-[calc(100vh-12rem)] w-full overflow-hidden rounded-2xl border border-white/10 bg-black/30"
+    : "relative h-112 w-full overflow-hidden rounded-2xl border border-white/10 bg-black/20";
+
   return (
-    <div className="glass-panel rounded-3xl p-6">
+    <>
+      {isFullscreen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur"
+          aria-hidden
+        />
+      )}
+      <div className={panelClasses}>
       <div className="mb-4 flex items-center justify-between">
         <p className="text-xs uppercase tracking-[0.4em] text-white/50">{title}</p>
-        {subtitle && <span className="text-xs text-white/40">{subtitle}</span>}
+          <div className="flex items-center gap-3">
+            {subtitle && <span className="text-xs text-white/40">{subtitle}</span>}
+            <button
+              type="button"
+              onClick={() => setIsFullscreen((prev) => !prev)}
+              className="rounded-full border border-white/20 bg-black/40 px-3 py-1 text-xs text-white/70 transition hover:text-white"
+            >
+              {isFullscreen ? "✕" : "Maximize"}
+            </button>
+          </div>
       </div>
       {hasNodes ? (
-        <div
-          ref={containerRef}
-          className="relative h-112 w-full overflow-hidden rounded-2xl border border-white/10 bg-black/20"
-        >
+          <div ref={containerRef} className={canvasWrapperClasses}>
           <canvas
             ref={canvasRef}
             className="h-full w-full cursor-grab active:cursor-grabbing"
@@ -226,7 +251,8 @@ export function ASTVisualizer({
           {emptyMessage}
         </p>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
