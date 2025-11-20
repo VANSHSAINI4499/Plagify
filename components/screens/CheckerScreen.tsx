@@ -6,13 +6,12 @@ import { CodeEditorWrapper, EditorHighlight } from "@/components/CodeEditorWrapp
 import { SimilarityResultPanel } from "@/components/SimilarityResultPanel";
 import { ASTVisualizer } from "@/components/ASTVisualizer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
 import { AnimatedAnalyzeButton } from "@/components/AnimatedAnalyzeButton";
 import { NormalizedCodePanel } from "@/components/NormalizedCodePanel";
 import {
   compareCodes,
   bulkCompare,
-  type CodeMetrics,
+  type CodeMetrics, 
   type CompareCodesResponse,
   type BulkCompareResult,
   type BulkSubmissionInput,
@@ -32,11 +31,28 @@ function PlaceholderPanel({ title, description }: { title: string; description: 
   );
 }
 
-type RiskLevel = "low" | "medium" | "high" | string;
+const editorLanguage = "python";
+
+const defaultSnippetA = `def normalize_scores(scores):
+    if not scores:
+        return []
+    maximum = max(scores)
+    return [round(score / maximum, 2) for score in scores]
+`;
+
+const defaultSnippetB = `def normalize_scores(scores):
+    if not isinstance(scores, list):
+        return []
+    peak = max(scores + [1])
+    normalized = []
+    for score in scores:
+        normalized.append(round(score / peak, 2))
+    return normalized
+`;
 
 type AnalysisResult = {
   similarityPercent: number;
-  riskLevel: RiskLevel;
+  riskLevel: string;
   semanticSimilarity: number;
   astSimilarity: number;
   tokenSimilarity: number;
@@ -47,48 +63,36 @@ type AnalysisResult = {
   normalizedSubmission?: string;
   referenceAst: ASTNode[];
   submissionAst: ASTNode[];
+  qualityScore?: number | null;
+  qualityLabel?: string | null;
+  qualityExplanation?: string | null;
+};
+
+type BulkResultView = {
+  id: string;
+  similarityPercent: number;
+  riskLevel: string;
+  semanticSimilarity: number;
+  astSimilarity: number;
+  tokenSimilarity: number;
+  explanation?: string;
   qualityScore?: number;
   qualityLabel?: string;
   qualityExplanation?: string;
 };
 
-type SubmissionEntry = BulkSubmissionInput & { localId: string };
-
-type BulkResultView = {
-  id: string;
-  similarityPercent: number;
-  riskLevel: RiskLevel;
-  semanticSimilarity: number;
-  astSimilarity: number;
-  tokenSimilarity: number;
-  explanation?: string;
-};
-
-const defaultSnippetA = `def analyze_quality(code: str) -> str:
-    metrics = compute_metrics(code)
-    score = metrics.get("score", 0)
-    return "great" if score > 0.8 else "needs work"`;
-
-const defaultSnippetB = `def analyze_quality(input_code: str) -> str:
-    metrics = compute_metrics(input_code)
-    score = metrics.get("score", 0)
-    return "good" if score > 0.75 else "improve"`;
-
-const editorLanguage = "python";
-const alphabetSequence = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
 export function CheckerScreen() {
   const [mode, setMode] = useState<"single" | "bulk">("single");
   const [codeA, setCodeA] = useState(defaultSnippetA);
   const [codeB, setCodeB] = useState(defaultSnippetB);
-  const [submissions, setSubmissions] = useState<SubmissionEntry[]>([
-    createSubmissionEntry(defaultSubmissionId(0), defaultSnippetB),
-  ]);
   const [uploadedFiles, setUploadedFiles] = useState<Record<string, string>>({});
+  const [selectedFilename, setSelectedFilename] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [bulkResults, setBulkResults] = useState<BulkResultView[] | null>(null);
+  const [bulkSortBy, setBulkSortBy] = useState<SortOption>("plagiarism");
+  const [selectedBulkId, setSelectedBulkId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("plagiarism");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -112,6 +116,48 @@ export function CheckerScreen() {
     }));
   }, [analysis, fallbackHighlights]);
   const uploadedFileNames = useMemo(() => Object.keys(uploadedFiles), [uploadedFiles]);
+  const selectedFileCode = useMemo(() => {
+    if (!selectedFilename) return "";
+    return uploadedFiles[selectedFilename] ?? "";
+  }, [selectedFilename, uploadedFiles]);
+  const sortedBulkResults = useMemo(
+    () => (bulkResults ? sortBulkResults(bulkResults, bulkSortBy) : []),
+    [bulkResults, bulkSortBy],
+  );
+  const selectedBulkResult = useMemo(() => {
+    if (!sortedBulkResults.length) return null;
+    if (selectedBulkId) {
+      const match = sortedBulkResults.find((entry) => entry.id === selectedBulkId);
+      if (match) return match;
+    }
+    return sortedBulkResults[0];
+  }, [selectedBulkId, sortedBulkResults]);
+
+  useEffect(() => {
+    setSelectedFilename((current) => {
+      if (current && uploadedFiles[current] !== undefined) {
+        return current;
+      }
+      const [first] = Object.keys(uploadedFiles);
+      return first ?? null;
+    });
+  }, [uploadedFiles]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!sortedBulkResults.length) {
+        setSelectedBulkId(null);
+        return;
+      }
+      setSelectedBulkId((current) => {
+        if (current && sortedBulkResults.some((entry) => entry.id === current)) {
+          return current;
+        }
+        return sortedBulkResults[0].id;
+      });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sortedBulkResults]);
 
   const handleAnalyze = async () => {
     setIsAnalyzing(true);
@@ -135,9 +181,9 @@ export function CheckerScreen() {
         return;
       }
 
-      const normalizedSubmissions = buildBulkSubmissionPayload(submissions, uploadedFiles);
+      const normalizedSubmissions = buildBulkSubmissionPayload(uploadedFiles);
       if (!normalizedSubmissions.length) {
-        throw new Error("Upload or add at least one submission to compare");
+        throw new Error("Upload at least one Python file to compare");
       }
 
       const response = await bulkCompare({
@@ -146,6 +192,8 @@ export function CheckerScreen() {
         submissions: normalizedSubmissions,
       });
       setBulkResults(mapBulkResults(response.results));
+      setBulkSortBy("plagiarism");
+      setSelectedBulkId(null);
       setAnalysis(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unexpected analyzer error");
@@ -154,28 +202,16 @@ export function CheckerScreen() {
     }
   };
 
-  const handleSubmissionCodeChange = (localId: string, value: string) => {
-    setSubmissions((prev) =>
-      prev.map((submission) => (submission.localId === localId ? { ...submission, code: value } : submission)),
-    );
+  const handleSelectUploadedFile = (filename: string) => {
+    if (!(filename in uploadedFiles)) return;
+    setSelectedFilename(filename);
   };
 
-  const handleSubmissionIdChange = (localId: string, value: string) => {
-    setSubmissions((prev) =>
-      prev.map((submission) => (submission.localId === localId ? { ...submission, id: value } : submission)),
-    );
-  };
-
-  const handleRemoveSubmission = (localId: string) => {
-    setSubmissions((prev) => (prev.length <= 1 ? prev : prev.filter((submission) => submission.localId !== localId)));
-  };
-
-  const handleAddSubmission = () => {
-    setSubmissions((prev) => {
-      const registry = new Set(prev.map((submission, index) => resolveSubmissionId(submission, index)));
-      const baseId = defaultSubmissionId(prev.length);
-      const uniqueId = reserveUniqueSubmissionId(baseId, registry);
-      return [...prev, createSubmissionEntry(uniqueId, "")];
+  const handleUploadedFileCodeChange = (value: string) => {
+    setUploadedFiles((prev) => {
+      if (!selectedFilename) return prev;
+      if (!(selectedFilename in prev)) return prev;
+      return { ...prev, [selectedFilename]: value };
     });
   };
 
@@ -186,6 +222,7 @@ export function CheckerScreen() {
       delete next[filename];
       return next;
     });
+    setSelectedFilename((current) => (current === filename ? null : current));
   };
 
   const handleClearUploadedFiles = () => {
@@ -193,6 +230,7 @@ export function CheckerScreen() {
       if (!Object.keys(prev).length) return prev;
       return {};
     });
+    setSelectedFilename(null);
   };
 
   const handleBulkFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -224,27 +262,17 @@ export function CheckerScreen() {
       return next;
     });
 
+    setSelectedFilename((current) => current ?? uploads[uploads.length - 1]?.name ?? null);
+
     event.target.value = "";
   };
 
   useEffect(() => {
     setActiveTab((current) => {
-      if (mode === "bulk") return "bulk";
-      return current === "bulk" ? "plagiarism" : current;
+      if (mode === "bulk") return "plagiarism";
+      return current;
     });
   }, [mode]);
-
-  useEffect(() => {
-    if (mode === "bulk" && bulkResults?.length) {
-      setActiveTab("bulk");
-    }
-  }, [mode, bulkResults]);
-
-  useEffect(() => {
-    if (mode === "bulk" && submissions.length === 0) {
-      setSubmissions([createSubmissionEntry(defaultSubmissionId(0), "")]);
-    }
-  }, [mode, submissions.length]);
 
   const hasAnalysis = mode === "single" && Boolean(analysis);
   const hasBulkResults = mode === "bulk" && Boolean(bulkResults?.length);
@@ -349,10 +377,18 @@ export function CheckerScreen() {
                 {uploadedFileNames.length ? (
                   <ul className="divide-y divide-white/5">
                     {uploadedFileNames.map((filename) => (
-                      <li key={filename} className="flex items-center gap-3 px-4 py-2 text-sm text-white/80">
-                        <span className="truncate" title={filename}>
+                      <li
+                        key={filename}
+                        className={`flex items-center gap-3 px-4 py-2 text-sm text-white/80 transition ${selectedFilename === filename ? "bg-white/10" : "hover:bg-white/5"}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSelectUploadedFile(filename)}
+                          className="flex-1 truncate text-left"
+                          aria-pressed={selectedFilename === filename}
+                        >
                           {filename}
-                        </span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleRemoveUploadedFile(filename)}
@@ -368,43 +404,36 @@ export function CheckerScreen() {
                 )}
               </div>
             </div>
-            {submissions.map((submission, index) => (
-              <div key={submission.localId} className="glass-panel space-y-4 rounded-3xl border border-white/10 bg-white/5 p-4">
+            {uploadedFileNames.length ? (
+              <div className="glass-panel space-y-4 rounded-3xl border border-white/10 bg-white/5 p-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <label className="text-xs uppercase tracking-[0.4em] text-white/60">Submission ID</label>
-                  <Input
-                    value={submission.id}
-                    onChange={(event) => handleSubmissionIdChange(submission.localId, event.target.value)}
-                    className="h-9 w-40 border-white/10 bg-black/30 text-white"
-                    maxLength={48}
-                  />
-                  {submissions.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveSubmission(submission.localId)}
-                      className="ml-auto rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-white/70 transition hover:border-rose-400/60 hover:text-rose-200"
-                    >
-                      Remove
-                    </button>
-                  )}
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.4em] text-white/60">Code preview</p>
+                    <p className="text-sm text-white/60">
+                      {selectedFilename ? `Editing ${selectedFilename}` : "Select a file to view"}
+                    </p>
+                  </div>
                 </div>
-                <CodeEditorWrapper
-                  label={`Submission ${getSubmissionLabel(submission, index)}`}
-                  code={submission.code}
-                  setCode={(value) => handleSubmissionCodeChange(submission.localId, value)}
-                  highlights={index === 0 ? highlights : []}
-                  language={editorLanguage}
-                  style={{ minHeight: "22rem", height: "22rem" }}
-                />
+                {selectedFilename ? (
+                  <CodeEditorWrapper
+                    label={selectedFilename}
+                    code={selectedFileCode}
+                    setCode={handleUploadedFileCodeChange}
+                    highlights={[]}
+                    language={editorLanguage}
+                    style={{ minHeight: "22rem", height: "22rem" }}
+                  />
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-sm text-white/60">
+                    Choose a filename from the list above to preview and edit its contents.
+                  </div>
+                )}
               </div>
-            ))}
-            <button
-              type="button"
-              onClick={handleAddSubmission}
-              className="w-full rounded-3xl border border-dashed border-white/20 py-4 text-sm font-semibold text-white/70 transition hover:border-white/40 hover:text-white"
-            >
-              + Add another submission
-            </button>
+            ) : (
+              <div className="rounded-3xl border border-dashed border-white/20 px-4 py-10 text-center text-sm text-white/60">
+                Upload .py files to edit them before running the analysis.
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -441,132 +470,178 @@ export function CheckerScreen() {
           </motion.div>
         )}
       </AnimatePresence>
+      {mode === "bulk" && (
+        hasBulkResults && bulkResults && selectedBulkResult ? (
+          <BulkResultsControls
+            results={sortedBulkResults}
+            sortBy={bulkSortBy}
+            selectedId={selectedBulkResult.id}
+            onSelect={setSelectedBulkId}
+            onSortChange={setBulkSortBy}
+          />
+        ) : (
+          <PlaceholderPanel
+            title="Bulk results pending"
+            description="Upload Python files and run Analyze to see batched comparisons."
+          />
+        )
+      )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
         <TabsList className="flex w-full flex-wrap gap-2 rounded-full bg-white/5 p-1">
-          <TabsTrigger value="plagiarism" disabled={mode !== "single" || !hasAnalysis}>
+          <TabsTrigger value="plagiarism" disabled={mode === "single" ? !hasAnalysis : !selectedBulkResult}>
             Plagiarism
           </TabsTrigger>
-          <TabsTrigger value="quality" disabled={mode !== "single" || !hasAnalysis}>
+          <TabsTrigger value="quality" disabled={mode === "single" ? !hasAnalysis : !selectedBulkResult}>
             Code Quality
           </TabsTrigger>
-          <TabsTrigger value="ast" disabled={mode !== "single" || !hasAnalysis}>
+          <TabsTrigger value="ast" disabled={mode === "single" ? !hasAnalysis : !selectedBulkResult}>
             AST Visualization
           </TabsTrigger>
-          <TabsTrigger value="normalized" disabled={mode !== "single" || !hasAnalysis}>
+          <TabsTrigger value="normalized" disabled={mode === "single" ? !hasAnalysis : !selectedBulkResult}>
             Normalized Code
-          </TabsTrigger>
-          <TabsTrigger value="bulk" disabled={mode !== "bulk" || !hasBulkResults}>
-            Bulk Results
           </TabsTrigger>
         </TabsList>
         <TabsContent value="plagiarism">
-          {mode !== "single" ? (
-            <PlaceholderPanel
-              title="Side-by-side mode disabled"
-              description="Switch to the side-by-side mode to view single submission verdicts."
-            />
-          ) : hasAnalysis && analysis ? (
+          {mode === "single" ? (
+            hasAnalysis && analysis ? (
+              <SimilarityResultPanel
+                similarityPercent={analysis.similarityPercent}
+                riskLevel={analysis.riskLevel}
+                semanticSim={analysis.semanticSimilarity}
+                structureSim={analysis.astSimilarity}
+                tokenSim={analysis.tokenSimilarity}
+                explanation={analysis.explanation}
+                animateKey={activeTab}
+              />
+            ) : (
+              <PlaceholderPanel
+                title="AI verdict pending"
+                description="Paste code on both sides and press Analyze to see similarity, risk level, and semantic scores."
+              />
+            )
+          ) : selectedBulkResult ? (
             <SimilarityResultPanel
-              similarityPercent={analysis.similarityPercent}
-              riskLevel={analysis.riskLevel}
-              semanticSim={analysis.semanticSimilarity}
-              structureSim={analysis.astSimilarity}
-              tokenSim={analysis.tokenSimilarity}
-              explanation={analysis.explanation}
-              animateKey={activeTab}
+              similarityPercent={selectedBulkResult.similarityPercent}
+              riskLevel={selectedBulkResult.riskLevel}
+              semanticSim={selectedBulkResult.semanticSimilarity}
+              structureSim={selectedBulkResult.astSimilarity}
+              tokenSim={selectedBulkResult.tokenSimilarity}
+              explanation={selectedBulkResult.explanation}
+              animateKey={`${activeTab}-${selectedBulkResult.id}`}
             />
           ) : (
             <PlaceholderPanel
-              title="AI verdict pending"
-              description="Paste code on both sides and press Analyze to see similarity, risk level, and semantic scores."
+              title="No submission selected"
+              description="Upload files, pick one from the dropdowns, and rerun Analyze to view its verdict."
             />
           )}
         </TabsContent>
         <TabsContent value="quality">
-          {mode !== "single" ? (
-            <PlaceholderPanel
-              title="Side-by-side mode disabled"
-              description="Switch to the single comparison mode to inspect detailed metrics."
-            />
-          ) : hasAnalysis && analysis ? (
-            <div className="space-y-6">
-              <QualitySummary
-                score={analysis.qualityScore}
-                label={analysis.qualityLabel}
-                explanation={analysis.qualityExplanation}
-                animateKey={activeTab}
+          {mode === "single" ? (
+            hasAnalysis && analysis ? (
+              <div className="space-y-6">
+                <QualitySummary
+                  score={analysis.qualityScore ?? undefined}
+                  label={analysis.qualityLabel ?? undefined}
+                  explanation={analysis.qualityExplanation ?? undefined}
+                  animateKey={activeTab}
+                />
+                <motion.div className="glass-panel grid gap-6 rounded-3xl p-8 md:grid-cols-2" layout>
+                  {metricPanels(analysis.referenceMetrics, analysis.submissionMetrics).map((panel) => (
+                    <MetricPanelCard key={panel.label} panel={panel} animateKey={activeTab} />
+                  ))}
+                </motion.div>
+              </div>
+            ) : (
+              <PlaceholderPanel
+                title="Metrics awaiting analysis"
+                description="Once you run the comparison, we will compute LOC, cyclomatic complexity, nesting depth, and more for each code sample."
               />
-              <motion.div className="glass-panel grid gap-6 rounded-3xl p-8 md:grid-cols-2" layout>
-                {metricPanels(analysis.referenceMetrics, analysis.submissionMetrics).map((panel) => (
-                  <MetricPanelCard key={panel.label} panel={panel} animateKey={activeTab} />
-                ))}
-              </motion.div>
-            </div>
+            )
+          ) : selectedBulkResult ? (
+            selectedBulkResult.qualityScore !== undefined ? (
+              <div className="space-y-6">
+                <QualitySummary
+                  score={selectedBulkResult.qualityScore}
+                  label={selectedBulkResult.qualityLabel}
+                  explanation={buildBulkQualityExplanation(selectedBulkResult)}
+                  animateKey={`${activeTab}-${selectedBulkResult.id}`}
+                />
+                <PlaceholderPanel
+                  title="Detailed metrics unavailable"
+                  description="Bulk comparisons currently return only aggregated quality scores."
+                />
+              </div>
+            ) : (
+              <PlaceholderPanel
+                title="Quality score unavailable"
+                description="This submission did not include a code quality score in the bulk response."
+              />
+            )
           ) : (
             <PlaceholderPanel
-              title="Metrics awaiting analysis"
-              description="Once you run the comparison, we will compute LOC, cyclomatic complexity, nesting depth, and more for each code sample."
+              title="No submission selected"
+              description="Upload files, pick one from the dropdowns, and rerun Analyze to inspect quality."
             />
           )}
         </TabsContent>
         <TabsContent value="ast">
-          {mode !== "single" ? (
+          {mode === "single" ? (
+            hasAnalysis && analysis ? (
+              <Tabs defaultValue="reference" className="space-y-4">
+                <TabsList className="w-full rounded-full bg-white/5">
+                  <TabsTrigger value="reference">Reference AST</TabsTrigger>
+                  <TabsTrigger value="submission">Submission AST</TabsTrigger>
+                </TabsList>
+                <TabsContent value="reference">
+                  <ASTVisualizer nodes={analysis.referenceAst} title="Reference AST" subtitle="Live" />
+                </TabsContent>
+                <TabsContent value="submission">
+                  <ASTVisualizer nodes={analysis.submissionAst} title="Submission AST" subtitle="Live" />
+                </TabsContent>
+              </Tabs>
+            ) : (
+              <PlaceholderPanel
+                title="Visual tree unavailable"
+                description="Run the analyzer to generate AST graphs with zoom and pan support."
+              />
+            )
+          ) : selectedBulkResult ? (
             <PlaceholderPanel
-              title="Side-by-side mode disabled"
-              description="Switch to the single comparison mode to explore AST graphs."
+              title="AST view not supported in bulk mode"
+              description="AST graphs require single comparisons so we can stream full parse trees."
             />
-          ) : hasAnalysis && analysis ? (
-            <Tabs defaultValue="reference" className="space-y-4">
-              <TabsList className="w-full rounded-full bg-white/5">
-                <TabsTrigger value="reference">Reference AST</TabsTrigger>
-                <TabsTrigger value="submission">Submission AST</TabsTrigger>
-              </TabsList>
-              <TabsContent value="reference">
-                <ASTVisualizer nodes={analysis.referenceAst} title="Reference AST" subtitle="Live" />
-              </TabsContent>
-              <TabsContent value="submission">
-                <ASTVisualizer nodes={analysis.submissionAst} title="Submission AST" subtitle="Live" />
-              </TabsContent>
-            </Tabs>
           ) : (
             <PlaceholderPanel
-              title="Visual tree unavailable"
-              description="Run the analyzer to generate AST graphs with zoom and pan support."
+              title="No submission selected"
+              description="Upload files, pick one from the dropdowns, and rerun Analyze to inspect ASTs."
             />
           )}
         </TabsContent>
         <TabsContent value="normalized">
-          {mode !== "single" ? (
+          {mode === "single" ? (
+            hasAnalysis && analysis ? (
+              <NormalizedCodePanel
+                referenceCode={analysis.normalizedReference}
+                submissionCode={analysis.normalizedSubmission}
+                language={editorLanguage}
+              />
+            ) : (
+              <PlaceholderPanel
+                title="Normalized view empty"
+                description="We will display canonicalized source for both files after running the comparison."
+              />
+            )
+          ) : selectedBulkResult ? (
             <PlaceholderPanel
-              title="Side-by-side mode disabled"
-              description="Switch back to single comparison to inspect normalized code."
-            />
-          ) : hasAnalysis && analysis ? (
-            <NormalizedCodePanel
-              referenceCode={analysis.normalizedReference}
-              submissionCode={analysis.normalizedSubmission}
-              language={editorLanguage}
+              title="Normalized view not available"
+              description="Bulk comparisons skip normalization previews to keep responses lightweight."
             />
           ) : (
             <PlaceholderPanel
-              title="Normalized view empty"
-              description="We will display canonicalized source for both files after running the comparison."
-            />
-          )}
-        </TabsContent>
-        <TabsContent value="bulk">
-          {mode !== "bulk" ? (
-            <PlaceholderPanel
-              title="Bulk mode inactive"
-              description="Switch to bulk upload mode to view aggregated submission scores."
-            />
-          ) : hasBulkResults && bulkResults ? (
-            <BulkResultsPanel results={bulkResults} />
-          ) : (
-            <PlaceholderPanel
-              title="Bulk results pending"
-              description="Add at least two submissions and run Analyze to see batched comparisons."
+              title="No submission selected"
+              description="Upload files, pick one from the dropdowns, and rerun Analyze to inspect normalized code."
             />
           )}
         </TabsContent>
@@ -679,52 +754,272 @@ function QualitySummary({
   );
 }
 
-function BulkResultsPanel({ results }: { results: BulkResultView[] }) {
+function buildBulkQualityExplanation(result: BulkResultView) {
+  if (result.qualityExplanation?.trim()) {
+    return result.qualityExplanation;
+  }
+  if (typeof result.qualityScore === "number" && Number.isFinite(result.qualityScore)) {
+    const scoreText = `${Math.round(result.qualityScore)}%`;
+    if (result.qualityLabel) {
+      return `${result.qualityLabel} quality rating at ${scoreText}.`;
+    }
+    return `Quality score reported at ${scoreText}.`;
+  }
+  if (result.qualityLabel) {
+    return `${result.qualityLabel} quality rating provided without additional explanation.`;
+  }
+  return "Quality signal was not included in this bulk comparison.";
+}
+
+type SortOption = "plagiarism" | "quality";
+
+const sortOptionMeta: Record<SortOption, { label: string; helper: string }> = {
+  plagiarism: {
+    label: "Plagiarism score",
+    helper: "Higher values mean more overlap with the reference",
+  },
+  quality: {
+    label: "Code quality score",
+    helper: "Higher values mean cleaner, more maintainable code",
+  },
+};
+
+function BulkResultsControls({
+  results,
+  sortBy,
+  selectedId,
+  onSelect,
+  onSortChange,
+}: {
+  results: BulkResultView[];
+  sortBy: SortOption;
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onSortChange: (value: SortOption) => void;
+}) {
   if (!results.length) return null;
   return (
-    <div className="space-y-6">
-      <p className="text-xs uppercase tracking-[0.4em] text-white/60">Batch submissions</p>
-      <div className="grid gap-4 md:grid-cols-2">
-        {results.map((result) => (
-          <motion.div key={result.id} layout className="glass-panel space-y-4 rounded-3xl p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.4em] text-white/50">Submission</p>
-                <p className="text-xl font-semibold text-white">{result.id}</p>
-              </div>
-              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${getRiskBadgeClasses(result.riskLevel)}`}>
-                {formatRiskLabel(result.riskLevel)}
-              </span>
-            </div>
-            <div className="text-4xl font-semibold text-cyan-200">{result.similarityPercent}%</div>
-            <div className="space-y-2">
-              <BulkMetricBar label="Semantic" value={result.semanticSimilarity} />
-              <BulkMetricBar label="Structural" value={result.astSimilarity} />
-              <BulkMetricBar label="Token" value={result.tokenSimilarity} />
-            </div>
-            {result.explanation && (
-              <p className="text-sm text-white/70">{result.explanation}</p>
-            )}
-          </motion.div>
-        ))}
+    <div className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-5 shadow-[0_0_55px_rgba(14,165,233,0.12)] md:flex-row md:items-center md:justify-between">
+      <div>
+        <p className="text-xs uppercase tracking-[0.4em] text-white/60">Batch submissions</p>
+        <p className="text-sm text-white/60">{results.length} compared file{results.length === 1 ? "" : "s"}</p>
+      </div>
+      <div className="flex w-full flex-col gap-3 sm:flex-row md:w-auto">
+        <SortDropdown sortBy={sortBy} onChange={onSortChange} />
+        <SubmissionDropdown sortBy={sortBy} results={results} selectedId={selectedId} onChange={onSelect} />
       </div>
     </div>
   );
 }
 
-function BulkMetricBar({ label, value }: { label: string; value: number }) {
-  const percent = clampPercent((value ?? 0) * 100);
+function SortDropdown({ sortBy, onChange }: { sortBy: SortOption; onChange: (value: SortOption) => void }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handler = (event: PointerEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handler);
+    return () => window.removeEventListener("pointerdown", handler);
+  }, []);
+
   return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-xs uppercase tracking-[0.4em] text-white/50">
-        <span>{label}</span>
-        <span>{percent}%</span>
-      </div>
-      <div className="h-1.5 rounded-full bg-white/5">
-        <div className="h-full rounded-full bg-white/40" style={{ width: `${percent}%` }} />
-      </div>
+    <div ref={containerRef} className="relative min-w-[220px]">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-white shadow-[0_12px_45px_rgba(15,23,42,0.35)]"
+      >
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.5em] text-white/50">Sort by</p>
+          <p className="text-sm font-semibold text-white">{sortOptionMeta[sortBy].label}</p>
+        </div>
+        <span className={`text-lg transition-transform ${open ? "rotate-180" : ""}`}>⌄</span>
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.ul
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            className="absolute right-0 top-full z-20 mt-2 w-full overflow-hidden rounded-2xl border border-white/10 bg-black/70 backdrop-blur"
+          >
+            {(Object.keys(sortOptionMeta) as SortOption[]).map((option) => (
+              <li key={option}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange(option);
+                    setOpen(false);
+                  }}
+                  className={`flex w-full flex-col gap-1 px-4 py-3 text-left transition hover:bg-white/5 ${sortBy === option ? "bg-white/5" : ""}`}
+                >
+                  <span className="text-sm font-semibold text-white">{sortOptionMeta[option].label}</span>
+                  <span className="text-xs text-white/60">{sortOptionMeta[option].helper}</span>
+                </button>
+              </li>
+            ))}
+          </motion.ul>
+        )}
+      </AnimatePresence>
     </div>
   );
+}
+
+function SubmissionDropdown({
+  results,
+  sortBy,
+  selectedId,
+  onChange,
+}: {
+  results: BulkResultView[];
+  sortBy: SortOption;
+  selectedId: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const selectedValue = getMetricScore(results.find((entry) => entry.id === selectedId), sortBy);
+  const selectedScore = formatScoreValue(selectedValue);
+
+  useEffect(() => {
+    const handler = (event: PointerEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handler);
+    return () => window.removeEventListener("pointerdown", handler);
+  }, []);
+
+  return (
+    <div ref={containerRef} className="relative min-w-[260px]">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-white shadow-[0_12px_45px_rgba(15,23,42,0.35)]"
+      >
+        <div className="flex-1">
+          <p className="text-[10px] uppercase tracking-[0.5em] text-white/50">Submission</p>
+          <p className="truncate text-sm font-semibold text-white">{selectedId || "Select a file"}</p>
+        </div>
+        <ScoreChip metric={sortBy} value={selectedValue ?? undefined} text={selectedScore} />
+        <span className={`text-lg transition-transform ${open ? "rotate-180" : ""}`}>⌄</span>
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.ul
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            className="absolute right-0 top-full z-20 mt-2 max-h-80 w-full overflow-auto rounded-2xl border border-white/10 bg-black/70 backdrop-blur"
+          >
+            {results.map((result) => {
+              const value = getMetricScore(result, sortBy);
+              return (
+                <li key={result.id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange(result.id);
+                      setOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white/5 ${selectedId === result.id ? "bg-white/5" : ""}`}
+                  >
+                    <span className="flex-1 truncate text-sm font-semibold text-white">{result.id}</span>
+                    <ScoreChip metric={sortBy} value={value} />
+                  </button>
+                </li>
+              );
+            })}
+          </motion.ul>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ScoreChip({
+  metric,
+  value,
+  text,
+}: {
+  metric: SortOption;
+  value?: number | null;
+  text?: string;
+}) {
+  const content = text ?? formatScoreValue(value);
+  return (
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${getScoreChipClasses(metric, value)}`}>
+      {content}
+    </span>
+  );
+}
+
+function normalizePercent(value: unknown): number | null {
+  const numeric = coerceFinite(value);
+  if (numeric === null) return null;
+  const percent = numeric <= 1 ? numeric * 100 : numeric;
+  return clampPercent(percent);
+}
+
+function coerceNumber(value: unknown): number {
+  return coerceFinite(value) ?? 0;
+}
+
+function coerceFinite(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function sortBulkResults(results: BulkResultView[], sortBy: SortOption) {
+  return [...results].sort((a, b) => {
+    const valueA = getMetricScore(a, sortBy);
+    const valueB = getMetricScore(b, sortBy);
+    const normalizedA = typeof valueA === "number" ? valueA : -1;
+    const normalizedB = typeof valueB === "number" ? valueB : -1;
+    return normalizedB - normalizedA;
+  });
+}
+
+function getMetricScore(result: BulkResultView | undefined, metric: SortOption): number | null {
+  if (!result) return null;
+  if (metric === "plagiarism") return result.similarityPercent ?? 0;
+  if (typeof result.qualityScore === "number") return result.qualityScore;
+  return null;
+}
+
+function formatScoreValue(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) return "--";
+  return `${Math.round(value)}%`;
+}
+
+function getScoreChipClasses(metric: SortOption, value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    return "bg-white/10 text-white/60";
+  }
+  const normalized = clampPercent(value);
+  if (metric === "plagiarism") {
+    if (normalized >= 75) return "bg-rose-500/20 text-rose-100";
+    if (normalized >= 40) return "bg-amber-500/20 text-amber-100";
+    return "bg-emerald-500/20 text-emerald-100";
+  }
+  if (normalized >= 75) return "bg-emerald-500/20 text-emerald-100";
+  if (normalized >= 50) return "bg-amber-500/20 text-amber-100";
+  return "bg-rose-500/20 text-rose-100";
 }
 
 function metricPanels(reference?: CodeMetrics, submission?: CodeMetrics): MetricPanel[] {
@@ -807,16 +1102,9 @@ function formatMetricValue(value: number) {
   return value.toFixed(2);
 }
 
-function buildBulkSubmissionPayload(entries: SubmissionEntry[], fileMap: Record<string, string>): BulkSubmissionInput[] {
+function buildBulkSubmissionPayload(fileMap: Record<string, string>): BulkSubmissionInput[] {
   const registry = new Set<string>();
   const payload: BulkSubmissionInput[] = [];
-
-  entries.forEach((entry, index) => {
-    if (!entry.code.trim()) return;
-    const baseId = resolveSubmissionId(entry, index);
-    const uniqueId = reserveUniqueSubmissionId(baseId, registry);
-    payload.push({ id: uniqueId, code: entry.code });
-  });
 
   Object.entries(fileMap).forEach(([filename, code]) => {
     if (!code.trim()) return;
@@ -826,12 +1114,6 @@ function buildBulkSubmissionPayload(entries: SubmissionEntry[], fileMap: Record<
   });
 
   return payload;
-}
-
-function resolveSubmissionId(entry: SubmissionEntry, index: number) {
-  const fallbackId = defaultSubmissionId(index);
-  const candidate = (entry.id?.trim() || fallbackId).replace(/\s+/g, "_");
-  return candidate || fallbackId;
 }
 
 function deriveSubmissionIdFromFilename(name: string) {
@@ -855,54 +1137,19 @@ function reserveUniqueSubmissionId(baseId: string, registry: Set<string>) {
   return unique;
 }
 
-function getSubmissionLabel(entry: SubmissionEntry, index: number) {
-  return entry.id?.trim() || defaultSubmissionId(index);
-}
-
-function createSubmissionEntry(id: string, code: string): SubmissionEntry {
-  return {
-    id,
-    code,
-    localId: generateLocalId(),
-  };
-}
-
-function generateLocalId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `submission-${Math.random().toString(36).slice(2)}`;
-}
-
-function defaultSubmissionId(index: number) {
-  return alphabetSequence[index] ?? `S${index + 1}`;
-}
-
 function mapBulkResults(results: BulkCompareResult[]): BulkResultView[] {
   return results.map((result) => ({
     id: result.id,
-    similarityPercent: clampPercent(
-      result.plagiarism_score <= 1 ? result.plagiarism_score * 100 : result.plagiarism_score,
-    ),
+    similarityPercent: normalizePercent(result.plagiarism_score) ?? 0,
     riskLevel: result.risk_level || "pending",
-    semanticSimilarity: result.semantic_similarity ?? 0,
-    astSimilarity: result.ast_similarity ?? 0,
-    tokenSimilarity: result.token_similarity ?? 0,
+    semanticSimilarity: coerceNumber(result.semantic_similarity),
+    astSimilarity: coerceNumber(result.ast_similarity),
+    tokenSimilarity: coerceNumber(result.token_similarity),
     explanation: result.explanation,
+    qualityScore: normalizePercent(result.quality_score) ?? undefined,
+    qualityLabel: result.quality_label,
+    qualityExplanation: result.quality_explanation,
   }));
-}
-
-function getRiskBadgeClasses(level?: string) {
-  switch ((level || "pending").toLowerCase()) {
-    case "high":
-      return "bg-rose-500/20 text-rose-100";
-    case "medium":
-      return "bg-amber-500/20 text-amber-100";
-    case "low":
-      return "bg-emerald-500/20 text-emerald-100";
-    default:
-      return "bg-white/10 text-white/70";
-  }
 }
 
 function getQualityLabelClasses(label?: string) {
@@ -919,21 +1166,6 @@ function getQualityLabelClasses(label?: string) {
       return "bg-rose-500/20 text-rose-100";
     default:
       return "bg-white/10 text-white/70";
-  }
-}
-
-function formatRiskLabel(level?: string) {
-  switch ((level || "pending").toLowerCase()) {
-    case "high":
-      return "High Risk";
-    case "medium":
-      return "Medium Risk";
-    case "low":
-      return "Low Risk";
-    case "none":
-      return "No Risk";
-    default:
-      return "Pending";
   }
 }
 

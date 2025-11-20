@@ -1,10 +1,10 @@
 const API_URL =
   process.env.NEXT_PUBLIC_COMPARE_ENDPOINT?.trim() ||
-  "https://ai-plagiarism-checker-and-quality-scorer.onrender.com/compare";
+  "/api/compare";
 
 const BULK_API_URL =
   process.env.NEXT_PUBLIC_BULK_COMPARE_ENDPOINT?.trim() ||
-  "https://ai-plagiarism-checker-and-quality-scorer.onrender.com/bulk-compare";
+  "/api/bulk-compare";
 
 export type CompareCodesPayload = {
   language: "python" | string;
@@ -65,7 +65,10 @@ export type BulkCompareResult = {
   semantic_similarity: number;
   ast_similarity: number;
   token_similarity: number;
-  explanation?: string;
+  explanation: string;
+  quality_score: number;
+  quality_label: string;
+  quality_explanation: string;
   message?: string;
 };
 
