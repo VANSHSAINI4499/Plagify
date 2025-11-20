@@ -2,6 +2,10 @@ const API_URL =
   process.env.NEXT_PUBLIC_COMPARE_ENDPOINT?.trim() ||
   "https://ai-plagiarism-checker-and-quality-scorer.onrender.com/compare";
 
+const BULK_API_URL =
+  process.env.NEXT_PUBLIC_BULK_COMPARE_ENDPOINT?.trim() ||
+  "https://ai-plagiarism-checker-and-quality-scorer.onrender.com/bulk-compare";
+
 export type CompareCodesPayload = {
   language: "python" | string;
   reference_code: string;
@@ -24,6 +28,9 @@ export type CompareCodesResponse = {
   ast_similarity: number;
   token_similarity: number;
   explanation?: string;
+  submission_quality_score?: number;
+  submission_quality_label?: string;
+  submission_quality_explanation?: string;
   reference: {
     metrics?: CodeMetrics;
     ast?: unknown;
@@ -36,6 +43,35 @@ export type CompareCodesResponse = {
     reference_code?: string;
     submission_code?: string;
   };
+  message?: string;
+};
+
+export type BulkSubmissionInput = {
+  id: string;
+  code: string;
+};
+
+export type BulkComparePayload = {
+  language: "python" | string;
+  reference_code: string;
+  submissions: BulkSubmissionInput[];
+};
+
+export type BulkCompareResult = {
+  id: string;
+  ok: boolean;
+  plagiarism_score: number;
+  risk_level: string;
+  semantic_similarity: number;
+  ast_similarity: number;
+  token_similarity: number;
+  explanation?: string;
+  message?: string;
+};
+
+export type BulkCompareResponse = {
+  ok: boolean;
+  results: BulkCompareResult[];
   message?: string;
 };
 
@@ -58,6 +94,34 @@ export async function compareCodes(payload: CompareCodesPayload): Promise<Compar
 
   if (!response.ok || !data?.ok) {
     throw new Error(data?.message || "Analysis failed");
+  }
+
+  return data;
+}
+
+export async function bulkCompare(payload: BulkComparePayload): Promise<BulkCompareResponse> {
+  if (!payload.submissions?.length) {
+    throw new Error("Add at least one submission to compare");
+  }
+
+  const response = await fetch(BULK_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+
+  let data: BulkCompareResponse | undefined;
+  try {
+    data = (await response.json()) as BulkCompareResponse;
+  } catch {
+    throw new Error("Unable to parse bulk analysis response");
+  }
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.message || "Bulk analysis failed");
   }
 
   return data;

@@ -1,14 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { motion, AnimatePresence, animate, useMotionValue, useTransform } from "framer-motion";
 import { CodeEditorWrapper, EditorHighlight } from "@/components/CodeEditorWrapper";
 import { SimilarityResultPanel } from "@/components/SimilarityResultPanel";
 import { ASTVisualizer } from "@/components/ASTVisualizer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
 import { AnimatedAnalyzeButton } from "@/components/AnimatedAnalyzeButton";
 import { NormalizedCodePanel } from "@/components/NormalizedCodePanel";
-import { compareCodes, type CodeMetrics, type CompareCodesResponse } from "@/lib/apiPlaceholders";
+import {
+  compareCodes,
+  bulkCompare,
+  type CodeMetrics,
+  type CompareCodesResponse,
+  type BulkCompareResult,
+  type BulkSubmissionInput,
+} from "@/lib/apiPlaceholders";
 import type { ASTNode } from "@/components/ASTVisualizer";
 
 function PlaceholderPanel({ title, description }: { title: string; description: string }) {
@@ -39,6 +47,21 @@ type AnalysisResult = {
   normalizedSubmission?: string;
   referenceAst: ASTNode[];
   submissionAst: ASTNode[];
+  qualityScore?: number;
+  qualityLabel?: string;
+  qualityExplanation?: string;
+};
+
+type SubmissionEntry = BulkSubmissionInput & { localId: string };
+
+type BulkResultView = {
+  id: string;
+  similarityPercent: number;
+  riskLevel: RiskLevel;
+  semanticSimilarity: number;
+  astSimilarity: number;
+  tokenSimilarity: number;
+  explanation?: string;
 };
 
 const defaultSnippetA = `def analyze_quality(code: str) -> str:
@@ -52,15 +75,23 @@ const defaultSnippetB = `def analyze_quality(input_code: str) -> str:
     return "good" if score > 0.75 else "improve"`;
 
 const editorLanguage = "python";
+const alphabetSequence = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 export function CheckerScreen() {
+  const [mode, setMode] = useState<"single" | "bulk">("single");
   const [codeA, setCodeA] = useState(defaultSnippetA);
   const [codeB, setCodeB] = useState(defaultSnippetB);
-  const [syncScroll, setSyncScroll] = useState<{ a: number; b: number }>({ a: 0, b: 0 });
+  const [submissions, setSubmissions] = useState<SubmissionEntry[]>([
+    createSubmissionEntry(defaultSubmissionId(0), defaultSnippetB),
+  ]);
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, string>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [bulkResults, setBulkResults] = useState<BulkResultView[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("plagiarism");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const fallbackHighlights = useMemo<EditorHighlight[]>(
     () => [
@@ -80,17 +111,42 @@ export function CheckerScreen() {
       color: `rgba(56,189,248,${0.2 + index * 0.1})`,
     }));
   }, [analysis, fallbackHighlights]);
+  const uploadedFileNames = useMemo(() => Object.keys(uploadedFiles), [uploadedFiles]);
 
   const handleAnalyze = async () => {
     setIsAnalyzing(true);
     setErrorMessage(null);
     try {
-      const response = await compareCodes({
+      if (!codeA.trim()) {
+        throw new Error("Reference code cannot be empty");
+      }
+
+      if (mode === "single") {
+        if (!codeB.trim()) {
+          throw new Error("Submission code cannot be empty");
+        }
+        const response = await compareCodes({
+          language: editorLanguage,
+          reference_code: codeA,
+          submission_code: codeB,
+        });
+        setAnalysis(mapToAnalysis(response));
+        setBulkResults(null);
+        return;
+      }
+
+      const normalizedSubmissions = buildBulkSubmissionPayload(submissions, uploadedFiles);
+      if (!normalizedSubmissions.length) {
+        throw new Error("Upload or add at least one submission to compare");
+      }
+
+      const response = await bulkCompare({
         language: editorLanguage,
         reference_code: codeA,
-        submission_code: codeB,
+        submissions: normalizedSubmissions,
       });
-      setAnalysis(mapToAnalysis(response));
+      setBulkResults(mapBulkResults(response.results));
+      setAnalysis(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unexpected analyzer error");
     } finally {
@@ -98,7 +154,100 @@ export function CheckerScreen() {
     }
   };
 
-  const hasAnalysis = Boolean(analysis);
+  const handleSubmissionCodeChange = (localId: string, value: string) => {
+    setSubmissions((prev) =>
+      prev.map((submission) => (submission.localId === localId ? { ...submission, code: value } : submission)),
+    );
+  };
+
+  const handleSubmissionIdChange = (localId: string, value: string) => {
+    setSubmissions((prev) =>
+      prev.map((submission) => (submission.localId === localId ? { ...submission, id: value } : submission)),
+    );
+  };
+
+  const handleRemoveSubmission = (localId: string) => {
+    setSubmissions((prev) => (prev.length <= 1 ? prev : prev.filter((submission) => submission.localId !== localId)));
+  };
+
+  const handleAddSubmission = () => {
+    setSubmissions((prev) => {
+      const registry = new Set(prev.map((submission, index) => resolveSubmissionId(submission, index)));
+      const baseId = defaultSubmissionId(prev.length);
+      const uniqueId = reserveUniqueSubmissionId(baseId, registry);
+      return [...prev, createSubmissionEntry(uniqueId, "")];
+    });
+  };
+
+  const handleRemoveUploadedFile = (filename: string) => {
+    setUploadedFiles((prev) => {
+      if (!(filename in prev)) return prev;
+      const next = { ...prev };
+      delete next[filename];
+      return next;
+    });
+  };
+
+  const handleClearUploadedFiles = () => {
+    setUploadedFiles((prev) => {
+      if (!Object.keys(prev).length) return prev;
+      return {};
+    });
+  };
+
+  const handleBulkFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files?.length) return;
+
+    const fileArray = Array.from(files);
+    const pythonFiles = fileArray.filter((file) => file.name.toLowerCase().endsWith(".py"));
+    const rejectedCount = fileArray.length - pythonFiles.length;
+    setUploadError(rejectedCount > 0 ? "Only Python (.py) files can be uploaded." : null);
+
+    if (!pythonFiles.length) {
+      event.target.value = "";
+      return;
+    }
+
+    const uploads = await Promise.all(
+      pythonFiles.map(async (file) => ({
+        name: file.name,
+        code: await file.text(),
+      })),
+    );
+
+    setUploadedFiles((prev) => {
+      const next = { ...prev };
+      uploads.forEach(({ name, code }) => {
+        next[name] = code;
+      });
+      return next;
+    });
+
+    event.target.value = "";
+  };
+
+  useEffect(() => {
+    setActiveTab((current) => {
+      if (mode === "bulk") return "bulk";
+      return current === "bulk" ? "plagiarism" : current;
+    });
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode === "bulk" && bulkResults?.length) {
+      setActiveTab("bulk");
+    }
+  }, [mode, bulkResults]);
+
+  useEffect(() => {
+    if (mode === "bulk" && submissions.length === 0) {
+      setSubmissions([createSubmissionEntry(defaultSubmissionId(0), "")]);
+    }
+  }, [mode, submissions.length]);
+
+  const hasAnalysis = mode === "single" && Boolean(analysis);
+  const hasBulkResults = mode === "bulk" && Boolean(bulkResults?.length);
 
   return (
     <div className="space-y-10">
@@ -111,27 +260,153 @@ export function CheckerScreen() {
           Editors sync scroll, share highlights, and animate as you explore similarity, quality, and AST breakdowns.
         </p>
       </motion.div>
+      <div className="flex flex-wrap items-center gap-4 rounded-3xl border border-white/10 bg-white/5 p-3">
+        <div className="inline-flex rounded-full bg-black/30 p-1">
+          <button
+            type="button"
+            onClick={() => setMode("single")}
+            className={`rounded-full px-5 py-2 text-sm font-semibold transition ${mode === "single" ? "bg-white text-black" : "text-white/70 hover:text-white"}`}
+          >
+            Side-by-side
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("bulk")}
+            className={`rounded-full px-5 py-2 text-sm font-semibold transition ${mode === "bulk" ? "bg-white text-black" : "text-white/70 hover:text-white"}`}
+          >
+            Bulk upload
+          </button>
+        </div>
+        <p className="text-sm text-white/70">
+          {mode === "single"
+            ? "Compare one submission alongside your reference."
+            : "Upload many files; IDs follow filenames and duplicate names get /number prefixes."}
+        </p>
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <CodeEditorWrapper
-          label="Code A"
+          label="Reference Code"
           code={codeA}
           setCode={setCodeA}
           highlights={highlights}
-          onScroll={(scrollTop) => setSyncScroll((prev) => ({ ...prev, a: scrollTop }))}
-          externalScrollTop={syncScroll.b}
           language={editorLanguage}
           style={{ minHeight: "32rem" }}
         />
-        <CodeEditorWrapper
-          label="Code B"
-          code={codeB}
-          setCode={setCodeB}
-          highlights={highlights}
-          onScroll={(scrollTop) => setSyncScroll((prev) => ({ ...prev, b: scrollTop }))}
-          externalScrollTop={syncScroll.a}
-          language={editorLanguage}
-          style={{ minHeight: "32rem" }}
-        />
+        {mode === "single" ? (
+          <CodeEditorWrapper
+            label="Submission Code"
+            code={codeB}
+            setCode={setCodeB}
+            highlights={highlights}
+            language={editorLanguage}
+            style={{ minHeight: "32rem" }}
+          />
+        ) : (
+          <div className="space-y-4">
+            <div className="glass-panel rounded-3xl border border-white/10 bg-white/5 p-5">
+              <div className="flex flex-wrap items-center gap-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.4em] text-white/60">Bulk uploads</p>
+                  <p className="text-sm text-white/60">Attach .py files</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="ml-auto rounded-full border border-white/20 px-4 py-2 text-sm font-semibold text-white transition hover:border-cyan-300/60 hover:text-cyan-200"
+                >
+                  Upload files
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".py"
+                className="hidden"
+                onChange={handleBulkFileSelect}
+              />
+              {uploadError && <p className="mt-3 text-xs text-rose-200">{uploadError}</p>}
+            </div>
+            <div className="glass-panel rounded-3xl border border-white/10 bg-white/5 p-5">
+              <div className="flex flex-wrap items-center gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.4em] text-white/60">Selected files</p>
+                  <p className="text-sm text-white/60">
+                    {uploadedFileNames.length ? `${uploadedFileNames.length} ready for bulk compare` : "No files selected yet"}
+                  </p>
+                </div>
+                {uploadedFileNames.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearUploadedFiles}
+                    className="ml-auto rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-white/70 transition hover:border-white/40 hover:text-white"
+                  >
+                    Clear all
+                  </button>
+                )}
+              </div>
+              <div className="mt-4 max-h-52 overflow-y-auto rounded-2xl border border-white/10 bg-black/30">
+                {uploadedFileNames.length ? (
+                  <ul className="divide-y divide-white/5">
+                    {uploadedFileNames.map((filename) => (
+                      <li key={filename} className="flex items-center gap-3 px-4 py-2 text-sm text-white/80">
+                        <span className="truncate" title={filename}>
+                          {filename}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveUploadedFile(filename)}
+                          className="ml-auto rounded-full border border-white/5 px-2 py-1 text-xs text-white/70 transition hover:border-rose-400/60 hover:text-rose-200"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="px-4 py-8 text-sm text-white/50">Upload .py files to see them listed here.</div>
+                )}
+              </div>
+            </div>
+            {submissions.map((submission, index) => (
+              <div key={submission.localId} className="glass-panel space-y-4 rounded-3xl border border-white/10 bg-white/5 p-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="text-xs uppercase tracking-[0.4em] text-white/60">Submission ID</label>
+                  <Input
+                    value={submission.id}
+                    onChange={(event) => handleSubmissionIdChange(submission.localId, event.target.value)}
+                    className="h-9 w-40 border-white/10 bg-black/30 text-white"
+                    maxLength={48}
+                  />
+                  {submissions.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveSubmission(submission.localId)}
+                      className="ml-auto rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-white/70 transition hover:border-rose-400/60 hover:text-rose-200"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <CodeEditorWrapper
+                  label={`Submission ${getSubmissionLabel(submission, index)}`}
+                  code={submission.code}
+                  setCode={(value) => handleSubmissionCodeChange(submission.localId, value)}
+                  highlights={index === 0 ? highlights : []}
+                  language={editorLanguage}
+                  style={{ minHeight: "22rem", height: "22rem" }}
+                />
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={handleAddSubmission}
+              className="w-full rounded-3xl border border-dashed border-white/20 py-4 text-sm font-semibold text-white/70 transition hover:border-white/40 hover:text-white"
+            >
+              + Add another submission
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-4">
@@ -168,14 +443,30 @@ export function CheckerScreen() {
       </AnimatePresence>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-        <TabsList className="w-full justify-start rounded-full bg-white/5">
-          <TabsTrigger value="plagiarism">Plagiarism</TabsTrigger>
-          <TabsTrigger value="quality">Code Quality</TabsTrigger>
-          <TabsTrigger value="ast">AST Visualization</TabsTrigger>
-          <TabsTrigger value="normalized">Normalized Code</TabsTrigger>
+        <TabsList className="flex w-full flex-wrap gap-2 rounded-full bg-white/5 p-1">
+          <TabsTrigger value="plagiarism" disabled={mode !== "single" || !hasAnalysis}>
+            Plagiarism
+          </TabsTrigger>
+          <TabsTrigger value="quality" disabled={mode !== "single" || !hasAnalysis}>
+            Code Quality
+          </TabsTrigger>
+          <TabsTrigger value="ast" disabled={mode !== "single" || !hasAnalysis}>
+            AST Visualization
+          </TabsTrigger>
+          <TabsTrigger value="normalized" disabled={mode !== "single" || !hasAnalysis}>
+            Normalized Code
+          </TabsTrigger>
+          <TabsTrigger value="bulk" disabled={mode !== "bulk" || !hasBulkResults}>
+            Bulk Results
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="plagiarism">
-          {hasAnalysis && analysis ? (
+          {mode !== "single" ? (
+            <PlaceholderPanel
+              title="Side-by-side mode disabled"
+              description="Switch to the side-by-side mode to view single submission verdicts."
+            />
+          ) : hasAnalysis && analysis ? (
             <SimilarityResultPanel
               similarityPercent={analysis.similarityPercent}
               riskLevel={analysis.riskLevel}
@@ -193,12 +484,25 @@ export function CheckerScreen() {
           )}
         </TabsContent>
         <TabsContent value="quality">
-          {hasAnalysis && analysis ? (
-            <motion.div className="glass-panel grid gap-6 rounded-3xl p-8 md:grid-cols-2" layout>
-              {metricPanels(analysis.referenceMetrics, analysis.submissionMetrics).map((panel) => (
-                <MetricPanelCard key={panel.label} panel={panel} animateKey={activeTab} />
-              ))}
-            </motion.div>
+          {mode !== "single" ? (
+            <PlaceholderPanel
+              title="Side-by-side mode disabled"
+              description="Switch to the single comparison mode to inspect detailed metrics."
+            />
+          ) : hasAnalysis && analysis ? (
+            <div className="space-y-6">
+              <QualitySummary
+                score={analysis.qualityScore}
+                label={analysis.qualityLabel}
+                explanation={analysis.qualityExplanation}
+                animateKey={activeTab}
+              />
+              <motion.div className="glass-panel grid gap-6 rounded-3xl p-8 md:grid-cols-2" layout>
+                {metricPanels(analysis.referenceMetrics, analysis.submissionMetrics).map((panel) => (
+                  <MetricPanelCard key={panel.label} panel={panel} animateKey={activeTab} />
+                ))}
+              </motion.div>
+            </div>
           ) : (
             <PlaceholderPanel
               title="Metrics awaiting analysis"
@@ -207,7 +511,12 @@ export function CheckerScreen() {
           )}
         </TabsContent>
         <TabsContent value="ast">
-          {hasAnalysis && analysis ? (
+          {mode !== "single" ? (
+            <PlaceholderPanel
+              title="Side-by-side mode disabled"
+              description="Switch to the single comparison mode to explore AST graphs."
+            />
+          ) : hasAnalysis && analysis ? (
             <Tabs defaultValue="reference" className="space-y-4">
               <TabsList className="w-full rounded-full bg-white/5">
                 <TabsTrigger value="reference">Reference AST</TabsTrigger>
@@ -228,7 +537,12 @@ export function CheckerScreen() {
           )}
         </TabsContent>
         <TabsContent value="normalized">
-          {hasAnalysis && analysis ? (
+          {mode !== "single" ? (
+            <PlaceholderPanel
+              title="Side-by-side mode disabled"
+              description="Switch back to single comparison to inspect normalized code."
+            />
+          ) : hasAnalysis && analysis ? (
             <NormalizedCodePanel
               referenceCode={analysis.normalizedReference}
               submissionCode={analysis.normalizedSubmission}
@@ -241,36 +555,25 @@ export function CheckerScreen() {
             />
           )}
         </TabsContent>
+        <TabsContent value="bulk">
+          {mode !== "bulk" ? (
+            <PlaceholderPanel
+              title="Bulk mode inactive"
+              description="Switch to bulk upload mode to view aggregated submission scores."
+            />
+          ) : hasBulkResults && bulkResults ? (
+            <BulkResultsPanel results={bulkResults} />
+          ) : (
+            <PlaceholderPanel
+              title="Bulk results pending"
+              description="Add at least two submissions and run Analyze to see batched comparisons."
+            />
+          )}
+        </TabsContent>
       </Tabs>
     </div>
   );
 }
-
-const defaultInsights = [
-  "High structural overlap across functions",
-  "Loop complexity mirrors original code",
-  "Variable naming shows strong similarity",
-];
-
-const defaultAst: { nodes: ASTNode[] } = {
-  nodes: [
-    {
-      type: "FunctionDeclaration",
-      children: [
-        { type: "Identifier", value: "compare" },
-        { type: "Parameter", value: "codeA" },
-        { type: "Parameter", value: "codeB" },
-        {
-          type: "BlockStatement",
-          children: [
-            { type: "VariableDeclaration", value: "score" },
-            { type: "ReturnStatement", value: "score" },
-          ],
-        },
-      ],
-    },
-  ],
-};
 
 const fallbackReferenceMetrics: CodeMetrics = {
   loc: 24,
@@ -284,21 +587,6 @@ const fallbackSubmissionMetrics: CodeMetrics = {
   cyclomatic: 4,
   max_nesting: 3,
   num_functions: 1,
-};
-
-const defaultAnalysis: AnalysisResult = {
-  similarityPercent: 72,
-  riskLevel: "medium",
-  semanticSimilarity: 0.81,
-  astSimilarity: 0.74,
-  tokenSimilarity: 0.68,
-  explanation: defaultInsights[0],
-  referenceMetrics: fallbackReferenceMetrics,
-  submissionMetrics: fallbackSubmissionMetrics,
-  normalizedReference: undefined,
-  normalizedSubmission: undefined,
-  referenceAst: defaultAst.nodes,
-  submissionAst: defaultAst.nodes,
 };
 
 type MetricPanel = {
@@ -321,6 +609,120 @@ function MetricPanelCard({ panel, animateKey }: { panel: MetricPanel; animateKey
           />
         ))}
       </dl>
+    </div>
+  );
+}
+
+function QualitySummary({
+  score = 0,
+  label,
+  explanation,
+  animateKey,
+}: {
+  score?: number;
+  label?: string;
+  explanation?: string;
+  animateKey: string;
+}) {
+  const clampedScore = clampPercent(score ?? 0);
+  const scoreMotion = useMotionValue(clampedScore);
+  const scoreText = useTransform(scoreMotion, (value) => `${Math.round(value)}%`);
+  const [typedText, setTypedText] = useState(explanation ?? "Awaiting quality insights...");
+
+  useEffect(() => {
+    if (animateKey !== "quality") {
+      scoreMotion.set(clampedScore);
+      return;
+    }
+    scoreMotion.set(0);
+    const controls = animate(scoreMotion, clampedScore, { duration: 0.9, ease: "easeOut" });
+    return () => controls.stop();
+  }, [animateKey, clampedScore, scoreMotion]);
+
+  useEffect(() => {
+    const target = explanation?.trim() || "Code structure is being inspected...";
+    let index = 0;
+    const resetTimer = setTimeout(() => setTypedText(""), 0);
+    const interval = setInterval(() => {
+      index += 1;
+      setTypedText(target.slice(0, index));
+      if (index >= target.length) {
+        clearInterval(interval);
+      }
+    }, 18);
+    return () => {
+      clearTimeout(resetTimer);
+      clearInterval(interval);
+    };
+  }, [explanation, animateKey]);
+
+  const badgeClasses = getQualityLabelClasses(label);
+
+  return (
+    <div className="space-y-4">
+      <motion.div layout className="glass-panel flex flex-wrap items-center gap-6 rounded-3xl border border-white/10 bg-white/5 p-6">
+        <div>
+          <p className="text-xs uppercase tracking-[0.4em] text-white/60">Submission quality score</p>
+          <motion.p className="text-5xl font-semibold text-cyan-200" layout>{scoreText}</motion.p>
+        </div>
+        <span className={`rounded-full px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] ${badgeClasses}`}>
+          {label?.toUpperCase() || "UNRATED"}
+        </span>
+      </motion.div>
+      <div className="rounded-3xl border border-white/10 bg-white/5 p-5">
+        <p className="text-xs uppercase tracking-[0.5em] text-white/50">Explanation</p>
+        <p className="mt-2 text-sm text-white/80">
+          <TypingCursor text={typedText} />
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function BulkResultsPanel({ results }: { results: BulkResultView[] }) {
+  if (!results.length) return null;
+  return (
+    <div className="space-y-6">
+      <p className="text-xs uppercase tracking-[0.4em] text-white/60">Batch submissions</p>
+      <div className="grid gap-4 md:grid-cols-2">
+        {results.map((result) => (
+          <motion.div key={result.id} layout className="glass-panel space-y-4 rounded-3xl p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.4em] text-white/50">Submission</p>
+                <p className="text-xl font-semibold text-white">{result.id}</p>
+              </div>
+              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${getRiskBadgeClasses(result.riskLevel)}`}>
+                {formatRiskLabel(result.riskLevel)}
+              </span>
+            </div>
+            <div className="text-4xl font-semibold text-cyan-200">{result.similarityPercent}%</div>
+            <div className="space-y-2">
+              <BulkMetricBar label="Semantic" value={result.semanticSimilarity} />
+              <BulkMetricBar label="Structural" value={result.astSimilarity} />
+              <BulkMetricBar label="Token" value={result.tokenSimilarity} />
+            </div>
+            {result.explanation && (
+              <p className="text-sm text-white/70">{result.explanation}</p>
+            )}
+          </motion.div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BulkMetricBar({ label, value }: { label: string; value: number }) {
+  const percent = clampPercent((value ?? 0) * 100);
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs uppercase tracking-[0.4em] text-white/50">
+        <span>{label}</span>
+        <span>{percent}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/5">
+        <div className="h-full rounded-full bg-white/40" style={{ width: `${percent}%` }} />
+      </div>
     </div>
   );
 }
@@ -405,6 +807,145 @@ function formatMetricValue(value: number) {
   return value.toFixed(2);
 }
 
+function buildBulkSubmissionPayload(entries: SubmissionEntry[], fileMap: Record<string, string>): BulkSubmissionInput[] {
+  const registry = new Set<string>();
+  const payload: BulkSubmissionInput[] = [];
+
+  entries.forEach((entry, index) => {
+    if (!entry.code.trim()) return;
+    const baseId = resolveSubmissionId(entry, index);
+    const uniqueId = reserveUniqueSubmissionId(baseId, registry);
+    payload.push({ id: uniqueId, code: entry.code });
+  });
+
+  Object.entries(fileMap).forEach(([filename, code]) => {
+    if (!code.trim()) return;
+    const baseId = deriveSubmissionIdFromFilename(filename);
+    const uniqueId = reserveUniqueSubmissionId(baseId, registry);
+    payload.push({ id: uniqueId, code });
+  });
+
+  return payload;
+}
+
+function resolveSubmissionId(entry: SubmissionEntry, index: number) {
+  const fallbackId = defaultSubmissionId(index);
+  const candidate = (entry.id?.trim() || fallbackId).replace(/\s+/g, "_");
+  return candidate || fallbackId;
+}
+
+function deriveSubmissionIdFromFilename(name: string) {
+  const withoutExtension = name.replace(/\.[^/.]+$/, "");
+  const normalized = withoutExtension.trim().replace(/\s+/g, "_");
+  return normalized || "Submission";
+}
+
+function reserveUniqueSubmissionId(baseId: string, registry: Set<string>) {
+  const candidate = baseId || "Submission";
+  if (!registry.has(candidate)) {
+    registry.add(candidate);
+    return candidate;
+  }
+  let counter = 1;
+  while (registry.has(`${counter}/${candidate}`)) {
+    counter += 1;
+  }
+  const unique = `${counter}/${candidate}`;
+  registry.add(unique);
+  return unique;
+}
+
+function getSubmissionLabel(entry: SubmissionEntry, index: number) {
+  return entry.id?.trim() || defaultSubmissionId(index);
+}
+
+function createSubmissionEntry(id: string, code: string): SubmissionEntry {
+  return {
+    id,
+    code,
+    localId: generateLocalId(),
+  };
+}
+
+function generateLocalId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `submission-${Math.random().toString(36).slice(2)}`;
+}
+
+function defaultSubmissionId(index: number) {
+  return alphabetSequence[index] ?? `S${index + 1}`;
+}
+
+function mapBulkResults(results: BulkCompareResult[]): BulkResultView[] {
+  return results.map((result) => ({
+    id: result.id,
+    similarityPercent: clampPercent(
+      result.plagiarism_score <= 1 ? result.plagiarism_score * 100 : result.plagiarism_score,
+    ),
+    riskLevel: result.risk_level || "pending",
+    semanticSimilarity: result.semantic_similarity ?? 0,
+    astSimilarity: result.ast_similarity ?? 0,
+    tokenSimilarity: result.token_similarity ?? 0,
+    explanation: result.explanation,
+  }));
+}
+
+function getRiskBadgeClasses(level?: string) {
+  switch ((level || "pending").toLowerCase()) {
+    case "high":
+      return "bg-rose-500/20 text-rose-100";
+    case "medium":
+      return "bg-amber-500/20 text-amber-100";
+    case "low":
+      return "bg-emerald-500/20 text-emerald-100";
+    default:
+      return "bg-white/10 text-white/70";
+  }
+}
+
+function getQualityLabelClasses(label?: string) {
+  switch ((label || "").toLowerCase()) {
+    case "excellent":
+      return "bg-emerald-500/15 text-emerald-200";
+    case "good":
+      return "bg-cyan-500/15 text-cyan-200";
+    case "average":
+    case "fair":
+      return "bg-amber-500/20 text-amber-100";
+    case "poor":
+    case "critical":
+      return "bg-rose-500/20 text-rose-100";
+    default:
+      return "bg-white/10 text-white/70";
+  }
+}
+
+function formatRiskLabel(level?: string) {
+  switch ((level || "pending").toLowerCase()) {
+    case "high":
+      return "High Risk";
+    case "medium":
+      return "Medium Risk";
+    case "low":
+      return "Low Risk";
+    case "none":
+      return "No Risk";
+    default:
+      return "Pending";
+  }
+}
+
+function TypingCursor({ text }: { text: string }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span>{text}</span>
+      <span className="inline-block h-4 w-0.5 animate-pulse bg-white/60" />
+    </span>
+  );
+}
+
 function mapToAnalysis(response: CompareCodesResponse): AnalysisResult {
   const percentRaw = response.plagiarism_score ?? 0;
   const similarityPercent = percentRaw <= 1 ? Math.round(percentRaw * 100) : Math.round(percentRaw);
@@ -421,6 +962,9 @@ function mapToAnalysis(response: CompareCodesResponse): AnalysisResult {
     normalizedSubmission: response.normalized?.submission_code,
     referenceAst: coerceAst(response.reference?.ast),
     submissionAst: coerceAst(response.submission?.ast),
+    qualityScore: response.submission_quality_score,
+    qualityLabel: response.submission_quality_label,
+    qualityExplanation: response.submission_quality_explanation,
   };
 }
 
