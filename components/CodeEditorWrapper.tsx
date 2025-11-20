@@ -133,6 +133,7 @@ export function CodeEditorWrapper({
         <Editor
           height="100%"
           defaultLanguage={language}
+          theme="vs-dark"
           value={code}
           onChange={(value) => setCode?.(value ?? "")}
           onMount={handleMount}

@@ -5,9 +5,7 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 
 const navItems = [
-  { label: "Features", href: "#features" },
-  { label: "Visuals", href: "#visuals" },
-  { label: "APIs", href: "#apis" },
+  { label: "APIs", href: "https://ai-plagiarism-checker-and-quality-scorer.onrender.com/docs", external: true },
 ];
 
 export function Navbar() {
@@ -29,6 +27,8 @@ export function Navbar() {
             <Link
               key={item.label}
               href={item.href}
+              target={item.external ? "_blank" : undefined}
+              rel={item.external ? "noreferrer" : undefined}
               className="relative text-white/70 transition hover:text-white"
             >
               {item.label}

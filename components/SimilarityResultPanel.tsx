@@ -9,7 +9,6 @@ import {
   useTransform,
 } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
-import { HeatmapLegend } from "@/components/HeatmapLegend";
 
 interface SimilarityResultPanelProps {
   similarityPercent: number;
@@ -106,7 +105,6 @@ export function SimilarityResultPanel({
           ))}
         </div>
       )}
-      <HeatmapLegend />
     </motion.div>
   );
 }
