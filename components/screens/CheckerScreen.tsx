@@ -6,7 +6,6 @@ import { CodeEditorWrapper, EditorHighlight } from "@/components/CodeEditorWrapp
 import { SimilarityResultPanel } from "@/components/SimilarityResultPanel";
 import { ASTVisualizer } from "@/components/ASTVisualizer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { AnimatedAnalyzeButton } from "@/components/AnimatedAnalyzeButton";
 import { NormalizedCodePanel } from "@/components/NormalizedCodePanel";
 import { compareCodes, type CodeMetrics, type CompareCodesResponse } from "@/lib/apiPlaceholders";
@@ -195,7 +194,7 @@ export function CheckerScreen() {
         </TabsContent>
         <TabsContent value="quality">
           {hasAnalysis && analysis ? (
-            <motion.div className="glass-panel grid gap-6 rounded-3xl p-6 md:grid-cols-2" layout>
+            <motion.div className="glass-panel grid gap-6 rounded-3xl p-8 md:grid-cols-2" layout>
               {metricPanels(analysis.referenceMetrics, analysis.submissionMetrics).map((panel) => (
                 <MetricPanelCard key={panel.label} panel={panel} animateKey={activeTab} />
               ))}
@@ -309,23 +308,19 @@ type MetricPanel = {
 
 function MetricPanelCard({ panel, animateKey }: { panel: MetricPanel; animateKey: string }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_0_80px_rgba(16,185,222,0.15)]">
+    <div className="rounded-3xl border border-white/10 bg-white/5 px-8 pb-8 pt-6 shadow-[0_0_90px_rgba(16,185,222,0.18)]">
       <p className="text-xs uppercase tracking-[0.4em] text-white/50">{panel.label}</p>
-      <div className="mt-4 overflow-hidden rounded-2xl border border-white/5 bg-black/30">
-        <ScrollArea className="max-h-56">
-          <dl className="space-y-3 p-4 text-white/80">
-            {panel.metrics.map((metric, index) => (
-              <MetricValue
-                key={`${panel.label}-${metric.label}`}
-                label={metric.label}
-                value={metric.value}
-                animateKey={animateKey}
-                index={index}
-              />
-            ))}
-          </dl>
-        </ScrollArea>
-      </div>
+      <dl className="mt-6 space-y-4 text-white/80">
+        {panel.metrics.map((metric, index) => (
+          <MetricValue
+            key={`${panel.label}-${metric.label}`}
+            label={metric.label}
+            value={metric.value}
+            animateKey={animateKey}
+            index={index}
+          />
+        ))}
+      </dl>
     </div>
   );
 }
