@@ -79,6 +79,9 @@ type BulkResultView = {
   qualityScore?: number;
   qualityLabel?: string;
   qualityExplanation?: string;
+  submissionAst: ASTNode[];
+  normalizedSubmission?: string;
+  submissionMetrics?: CodeMetrics;
 };
 
 export function CheckerScreen() {
@@ -568,10 +571,27 @@ export function CheckerScreen() {
                   explanation={buildBulkQualityExplanation(selectedBulkResult)}
                   animateKey={`${activeTab}-${selectedBulkResult.id}`}
                 />
-                <PlaceholderPanel
-                  title="Detailed metrics unavailable"
-                  description="Bulk comparisons currently return only aggregated quality scores."
-                />
+                {selectedBulkResult.submissionMetrics ? (
+                  <motion.div className="glass-panel rounded-3xl p-6" layout>
+                    <p className="text-xs uppercase tracking-[0.4em] text-white/50">Submission metrics</p>
+                    <dl className="mt-4 grid gap-4 md:grid-cols-2">
+                      {buildMetricEntries(selectedBulkResult.submissionMetrics).map((metric) => (
+                        <div
+                          key={`bulk-${selectedBulkResult.id}-${metric.label}`}
+                          className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-white/80"
+                        >
+                          <dt className="text-xs uppercase tracking-[0.4em] text-white/50">{metric.label}</dt>
+                          <dd className="text-lg font-semibold text-cyan-100">{formatMetricValue(metric.value)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </motion.div>
+                ) : (
+                  <motion.div className="glass-panel rounded-3xl p-6" layout>
+                    <p className="text-xs uppercase tracking-[0.4em] text-white/50">Submission metrics</p>
+                    <p className="text-sm text-white/60">No metrics returned for this submission.</p>
+                  </motion.div>
+                )}
               </div>
             ) : (
               <PlaceholderPanel
@@ -608,10 +628,18 @@ export function CheckerScreen() {
               />
             )
           ) : selectedBulkResult ? (
-            <PlaceholderPanel
-              title="AST view not supported in bulk mode"
-              description="AST graphs require single comparisons so we can stream full parse trees."
-            />
+            selectedBulkResult.submissionAst.length ? (
+              <ASTVisualizer
+                nodes={selectedBulkResult.submissionAst}
+                title="Submission AST"
+                subtitle={`Bulk · ${selectedBulkResult.id}`}
+              />
+            ) : (
+              <PlaceholderPanel
+                title="AST tree unavailable"
+                description="This bulk response did not include a submission AST payload."
+              />
+            )
           ) : (
             <PlaceholderPanel
               title="No submission selected"
@@ -634,10 +662,18 @@ export function CheckerScreen() {
               />
             )
           ) : selectedBulkResult ? (
-            <PlaceholderPanel
-              title="Normalized view not available"
-              description="Bulk comparisons skip normalization previews to keep responses lightweight."
-            />
+            selectedBulkResult.normalizedSubmission ? (
+              <NormalizedCodePanel
+                referenceCode={codeA}
+                submissionCode={selectedBulkResult.normalizedSubmission}
+                language={editorLanguage}
+              />
+            ) : (
+              <PlaceholderPanel
+                title="Normalized view unavailable"
+                description="This bulk response did not include normalized code output."
+              />
+            )
           ) : (
             <PlaceholderPanel
               title="No submission selected"
@@ -1149,6 +1185,9 @@ function mapBulkResults(results: BulkCompareResult[]): BulkResultView[] {
     qualityScore: normalizePercent(result.quality_score) ?? undefined,
     qualityLabel: result.quality_label,
     qualityExplanation: result.quality_explanation,
+    submissionAst: coerceAst(result.submission_ast),
+    normalizedSubmission: result.normalized_code ?? undefined,
+    submissionMetrics: result.metrics ?? undefined,
   }));
 }
 

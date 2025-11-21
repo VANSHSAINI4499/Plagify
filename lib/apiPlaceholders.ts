@@ -69,6 +69,12 @@ export type BulkCompareResult = {
   quality_score: number;
   quality_label: string;
   quality_explanation: string;
+  submission_ast?: unknown;
+  reference_ast?: unknown;
+  normalized_code?: string;
+  normalized_reference_code?: string;
+  metrics?: CodeMetrics;
+  error?: string | null;
   message?: string;
 };
 
